@@ -11,7 +11,7 @@ from tenacity import (
     wait_random_exponential,
     retry_if_exception_type,
 )
-from typing import List, Dict, Optional, Set, TypedDict, Union, Sequence
+from typing import List, Dict, Optional, Set, Union, Sequence
 import logging
 from datetime import datetime
 from tqdm import tqdm
@@ -22,15 +22,6 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, PythonLexer
 from pdf_toc_reader import is_leaf_section
-
-
-# Type definitions
-class Flashcard(TypedDict, total=False):
-    Front: str
-    FrontCode: str
-    Back: str
-    BackCode: str
-    Comments: str
 
 
 @dataclass
@@ -708,7 +699,7 @@ def create_anki_deck(
     )
 
 
-def extract_flashcards(data: Union[Dict, List]) -> List[Flashcard]:
+def extract_flashcards(data: Union[Dict, List]) -> List[Dict[str, str]]:
     """
     Extract flashcards from JSON data, handling both dict and list formats.
 

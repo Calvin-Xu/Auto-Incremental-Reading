@@ -1,26 +1,39 @@
-# Book-To-Anki
+# Auto-Incremental-Reading
 
 Motivation:
-* There are books about things I understand to some extent (["Do not learn if you do not understand"](https://www.supermemo.com/en/blog/twenty-rules-of-formulating-knowledge)!) and want to read, but are hundreds of pages and I do not have enough activation energy.
-* Incremental reading & making flashcards take a lot of time
-Solution:
-* We can generate cards with LLMs cheaply. Just suspend or delete ones that don't work.
-* Let's read the book while studying cards incrementally by putting book sections on cards.
 
-What this tool does:
+- There are books about things I have a working knowledge of (["Do not learn if you do not understand"](https://www.supermemo.com/en/blog/twenty-rules-of-formulating-knowledge)!) and want to read, but are hundreds of pages and I do not have enough activation energy.
+- Incremental reading & making flashcards take a lot of time
+
+Solution:
+
+- We can generate cards with LLMs cheaply. Just suspend or delete ones that don't work or you already know.
+- Let's read the book incrementally while studying cards by putting book sections on cards.
+
+## What this tool does:
+
+Helps you generate cards like this for an entire book with no initial effort.
+
+| ![Example card front](assets/example_front.jpeg) | ![Example card back](assets/example_back.jpeg) |
+| ------------------------------------------------ | ---------------------------------------------- |
+
+(credit: [Fluent Python, Second Edition](https://www.fluentpython.com/))
+
 - Takes a pdf file w/ a valid Table of Contents. Finds all the leaf sections and their page ranges
 - Generates a directory tree matching ToS structure; saves cropped bitmap images to directories of leaf sections
-- For each leaf section, uses the OpenAI multimodal API to generate flashcards; saves to `flashcards.json` of the section's directory
+- For each leaf section, uses the OpenAI multimodal API to generate flashcards; saves to `flashcards.json` per-section
 - Tangle CSV that can be imported to Anki
   - Code fields can be rendered to HTML using Pygments to support syntax highlighting
 
 Each note is also associated with
+
 - `source`: ToS path to section
 - `source_imgs`: image tags pointing to each page in the section
 
-page images are renamed & copied to `img_assets`; you can copy them to your Anki media folder to be able to view them while studying / reviewing.
+Images of pages are renamed & copied to `img_assets`; copy them to your Anki media folder to view them while studying / reviewing.
 
 ## Example Usage
+
 ```python
 from flashcard_creator import (
     create_flashcards_for_book,
@@ -75,18 +88,10 @@ result = create_anki_deck(
 print(f"\nCreated Anki csv at: {result.csv_path}")
 print(f"Media assets directory: {result.img_assets_dir}")
 
-if result.missing_sections:
-    print("\nSections missing flashcards:")
-    for section in result.missing_sections:
-        print(f"  - {section}")
-
-if result.error_sections:
-    print("\nSections with errors during processing:")
-    for section in result.error_sections:
-        print(f"  - {section}")
-
 ```
 
 ### Notes
+
 - Mapping and logging files are created in the ToS tree directory.
 - Currently uses no batching or concurrent requests. It is not that slow for a whole book and I get rate-limited.
+- Works for books with no selectable text. But needs a ToC where leaf sections have sane lengths.
