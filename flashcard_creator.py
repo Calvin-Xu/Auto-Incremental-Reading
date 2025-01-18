@@ -1,5 +1,5 @@
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from openai import OpenAI, RateLimitError, APIError, APIConnectionError
@@ -11,10 +11,9 @@ from tenacity import (
     wait_random_exponential,
     retry_if_exception_type,
 )
-from typing import List, Dict, Optional, Set, TypedDict, Union
+from typing import List, Dict, Optional, Set, TypedDict, Union, Sequence
 import logging
 from datetime import datetime
-import sys
 from tqdm import tqdm
 import csv
 import markdown
@@ -22,6 +21,7 @@ import shutil
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name, PythonLexer
+from pdf_toc_reader import is_leaf_section
 
 
 # Type definitions
@@ -38,11 +38,38 @@ class AnkiDeckConfig:
     """Configuration for Anki deck creation."""
 
     fields: List[str]
-    strip_markdown_code_fields: Set[str]
+    code_fields: Set[str]
     render_markdown: bool = True
     syntax_highlight_html: bool = False
     separator: str = ":"
-    mapping_file: str = "directory_mapping.json"
+    mapping_filename: str = "directory_mapping.json"
+
+
+@dataclass
+class FlashcardPromptConfig:
+    """Configuration for flashcard generation prompt."""
+
+    cards_per_page: int = 3
+    model: str = "gpt-4o"
+    temperature: Optional[float] = None
+    template: str = """You are a teacher and Anki expert, helping students master content from the book *{book_title}* using spaced repetition. You are presented with screenshots of the chapter '{chapter_path}'. Create flashcards that cover key concepts and insights from the chapter, on average {cards_per_page} cards per page.
+
+**Guidelines:**
+- **Variety:** Include questions ranging from basic to complex, presenting facts from different angles.
+- **Self-Containment:** Ensure each question is self-contained, similar to exam questions.
+  - If a question uses code that is specific to the book but not the general topic, include the necessary code in the **FrontCode** field.
+  - **No Answer Leaks:** Do not include code or comments in **FrontCode** that reveal the answer to the question. Such code should instead be placed in **BackCode**.
+- **Techniques:** Use examples and mnemonic devices where possible.
+- **Clarity:** Craft concise, engaging questions and answers, simplifying complex ideas into clear maxims.
+
+**Output Format:** Provide a JSON list of cards, each with the following fields using Markdown syntax where applicable:
+- **Front:** A concise, self-contained question that does not require additional context.
+- **FrontCode:** All necessary code snippets from the chapter needed to understand and answer the question. Ensure that **FrontCode** does not contain code or comments that leak the answer.
+- **Back:** A brief answer or explanation.
+- **BackCode:** Optional concise, properly formatted code example from the chapter that illustrates the answer. Leave empty if it is included in **FrontCode**.
+- **Comments:** Optional mnemonics or study notes to aid learning.
+
+**Note:** Base each card solely on the content of "{chapter_title}", ignoring any overlapping content from adjacent chapters in the screenshots."""
 
 
 def encode_image(image_path: str | Path) -> str:
@@ -57,24 +84,32 @@ def encode_image(image_path: str | Path) -> str:
     retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
 )
 def create_flashcards_with_backoff(
-    client: OpenAI, messages: List[Dict], max_tokens: int = 2000
+    client: OpenAI,
+    messages: List[Dict],
+    model: str,
+    temperature: Optional[float] = None,
+    max_tokens: int = 2000,
 ):
     """Make API call with exponential backoff retry logic."""
+    logger = logging.getLogger(__name__)
     try:
-        return client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
+        params = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        if temperature is not None:
+            params["temperature"] = temperature
+        return client.chat.completions.create(**params)
     except RateLimitError:
-        print("Rate limit hit, backing off...")
+        logger.warning("Rate limit hit, backing off...")
         raise
     except APIConnectionError as e:
-        print(f"Connection error: {e.__cause__}")
+        logger.error(f"Connection error: {e.__cause__}")
         raise
     except APIError as e:
-        print(f"API error: {e}")
+        logger.error(f"API error: {e}")
         raise
 
 
@@ -98,38 +133,12 @@ def setup_logging(log_file: Optional[str] = None) -> None:
         root_logger.addHandler(file_handler)
 
 
-def is_leaf_section(rel_path: str, section_info: Dict, mappings: Dict) -> bool:
-    """
-    Determine if a section is a leaf section in the TOC hierarchy.
-
-    Args:
-        rel_path: The relative path key of the section
-        section_info: The section's information dictionary
-        mappings: The complete mappings dictionary
-
-    Returns:
-        bool: True if this is a leaf section, False otherwise
-    """
-    # Not a leaf if it's a parent of any other section
-    if any(other_info["parent"] == rel_path for other_info in mappings.values()):
-        return False
-
-    # Not a leaf if it's a root section
-    if section_info["parent"] == "":
-        return False
-
-    # Must be in the actual hierarchy
-    return any(
-        other_info["full_toc_path"].startswith(section_info["full_toc_path"])
-        for other_info in mappings.values()
-    )
-
-
 def create_flashcards_for_book(
     book_title: str,
     mapping_file: str | Path,
     resume_from: Optional[str] = None,
     log_file: Optional[str] = None,
+    prompt_config: Optional[FlashcardPromptConfig] = FlashcardPromptConfig(),
 ) -> None:
     """
     Create flashcards for all sections in a book using the mapping file.
@@ -222,10 +231,12 @@ def create_flashcards_for_book(
                     pbar.update(1)
                     continue
 
-                create_flashcards_from_directory(
+                create_flashcards_from_section_directory(
                     directory_path=section_dir,
                     book_title=book_title,
-                    chapter_title=section_info["full_toc_path"],
+                    chapter_path=section_info["full_toc_path"],
+                    chapter_title=section_info["title"],
+                    prompt_config=prompt_config,
                 )
                 processed_sections.add(rel_path)
                 logger.info(
@@ -289,21 +300,25 @@ def validate_flashcard_json(content: str) -> bool:
         return False
 
 
-def create_flashcards_from_directory(
+def create_flashcards_from_section_directory(
     directory_path: str | Path,
     book_title: str,
+    chapter_path: str,
     chapter_title: str,
     max_retries: int = 3,
+    prompt_config: Optional[FlashcardPromptConfig] = FlashcardPromptConfig(),
 ) -> None:
     """
-    Create Anki flashcards from images in a directory using GPT-4V.
+    Create Anki flashcards from images in a directory using OpenAI API.
 
     Args:
         directory_path: Path to directory containing images
         book_title: Title of the book
-        chapter_title: Full path of the chapter/section in the book
+        chapter_path: Full path of the chapter/section in the book
         max_retries: Maximum number of retries for invalid JSON responses
+        prompt_config: Configuration for the flashcard generation prompt
     """
+    logger = logging.getLogger(__name__)
     directory_path = Path(directory_path)
     if not directory_path.exists():
         raise ValueError(f"Directory not found: {directory_path}")
@@ -317,32 +332,24 @@ def create_flashcards_from_directory(
     if not image_files:
         raise ValueError(f"No images found in {directory_path}")
 
+    logger.info(f"Processing {len(image_files)} images from {directory_path}")
+
     # Create OpenAI client
     client = OpenAI()
+
+    # Format the prompt template with provided values
+    prompt_text = prompt_config.template.format(
+        book_title=book_title,
+        chapter_path=chapter_path,
+        chapter_title=chapter_title,
+        cards_per_page=prompt_config.cards_per_page,
+    )
 
     # Prepare the message with context and all images
     message_content = [
         {
             "type": "text",
-            "text": f"""You are an expert in computer science education and Python, helping students master `{book_title}` using spaced repetition. You are presented with screenshots of the chapter titled "`{chapter_title}`". Create flashcards that cover key concepts and insights from the chapter, up to 3 cards per page.
-
-**Guidelines:**
-- **Variety:** Include questions ranging from basic to complex, presenting facts from different angles.
-- **Self-Containment:** Ensure each question is self-contained, similar to exam questions.
-  - If a question references specific code snippets or classes from the chapter (e.g., `ClubMember`), include the necessary code in the **FrontCode** field.
-  - **No Answer Leaks:** Do not include code or comments in **FrontCode** that reveal the answer to the question. Such code should instead be placed in **BackCode**.
-- **Techniques:** Use examples and mnemonic devices where possible.
-- **Clarity:** Craft concise, engaging questions and answers, simplifying complex ideas into clear maxims.
-
-**Output Format:** Provide a JSON list of cards, each with the following fields using Markdown syntax where applicable:
-- **Front:** A concise, self-contained question that does not require additional context.
-- **FrontCode:** All necessary code snippets from the chapter needed to understand and answer the question. Ensure that **FrontCode** does not contain code or comments that leak the answer.
-- **Back:** A brief answer or explanation.
-- **BackCode:** Optional concise, properly formatted code example from the chapter that illustrates the answer. Leave empty if it is included in **FrontCode**.
-- **Comments:** Optional mnemonics or study notes to aid learning.
-
-**Note:** Base each card solely on the content of "`{chapter_title}`", ignoring any overlapping content from adjacent chapters in the screenshots.
-""",
+            "text": prompt_text,
         }
     ]
 
@@ -362,9 +369,14 @@ def create_flashcards_from_directory(
 
     while attempts < max_retries:
         try:
+            logger.info(
+                f"Attempting to generate flashcards (attempt {attempts + 1}/{max_retries})"
+            )
             response = create_flashcards_with_backoff(
                 client=client,
                 messages=[{"role": "user", "content": message_content}],
+                model=prompt_config.model,
+                temperature=prompt_config.temperature,
             )
 
             content = response.choices[0].message.content
@@ -375,24 +387,25 @@ def create_flashcards_from_directory(
                 flashcards_file = directory_path / "flashcards.json"
                 with open(flashcards_file, "w", encoding="utf-8") as f:
                     f.write(content)
+                logger.info(f"Successfully created flashcards at {flashcards_file}")
                 return
 
             # If JSON is invalid, try again
-            print(
+            logger.warning(
                 f"Attempt {attempts + 1}/{max_retries}: Invalid JSON response, retrying..."
             )
             attempts += 1
             time.sleep(1)  # Small delay before retry
 
         except (RateLimitError, APIConnectionError) as e:
-            print(f"Failed due to rate limit or connection error: {e}")
+            logger.error(f"Failed due to rate limit or connection error: {e}")
             raise
         except APIError as e:
-            print(f"API error: {e}")
+            logger.error(f"API error: {e}")
             raise
         except Exception as e:
             last_error = e
-            print(f"Unexpected error on attempt {attempts + 1}: {e}")
+            logger.error(f"Unexpected error on attempt {attempts + 1}: {e}")
             attempts += 1
             if attempts < max_retries:
                 time.sleep(1)
@@ -403,6 +416,7 @@ def create_flashcards_from_directory(
     error_msg = f"Failed to generate valid flashcards after {max_retries} attempts"
     if last_error:
         error_msg += f": {str(last_error)}"
+    logger.error(error_msg)
     raise ValueError(error_msg)
 
 
@@ -522,7 +536,7 @@ def process_section_images(
 def process_card_field(
     value: str,
     field: str,
-    strip_markdown_code_fields: Set[str],
+    code_fields: Set[str],
     render_markdown: bool,
     syntax_highlight_html: bool,
 ) -> str:
@@ -532,7 +546,7 @@ def process_card_field(
     Args:
         value: The field value to process
         field: The name of the field
-        strip_markdown_code_fields: Set of fields to strip markdown code from
+        code_fields: Set of fields to strip markdown & syntax highlight with Pygments
         render_markdown: Whether to render markdown as HTML
         syntax_highlight_html: Whether to apply syntax highlighting
 
@@ -542,7 +556,7 @@ def process_card_field(
     if not value:
         return value
 
-    if field in strip_markdown_code_fields:
+    if field in code_fields:
         value = strip_markdown_code_block(value)
         if value:
             if syntax_highlight_html:
@@ -558,10 +572,20 @@ def process_card_field(
     return value
 
 
+@dataclass
+class DeckCreationResult:
+    """Result of deck creation process."""
+
+    csv_path: Path
+    img_assets_dir: Path
+    missing_sections: Sequence[str] = field(default_factory=list)
+    error_sections: Sequence[str] = field(default_factory=list)
+
+
 def create_anki_deck(
     directory: str | Path,
     config: AnkiDeckConfig,
-) -> List[str]:
+) -> DeckCreationResult:
     """
     Create an Anki-importable deck from flashcards.json files, including media assets.
 
@@ -576,15 +600,14 @@ def create_anki_deck(
         config: Configuration for deck creation
 
     Returns:
-        List of directories that don't have flashcards.json
+        DeckCreationResult containing paths to created files and any sections with issues
 
-    Creates:
-        - deck.csv: The Anki-importable deck file
-        - img_assets/: Directory containing renamed images for Anki import
+    Raises:
+        ValueError: If the mapping file is missing or invalid
     """
     logger = logging.getLogger(__name__)
     directory = Path(directory)
-    mapping_path = directory / config.mapping_file
+    mapping_path = directory / config.mapping_filename
 
     # Create img_assets directory
     img_assets_dir = directory / "img_assets"
@@ -601,7 +624,8 @@ def create_anki_deck(
 
     # Prepare CSV
     csv_path = directory / "deck.csv"
-    missing_flashcards = []
+    missing_sections = []
+    error_sections = []
 
     # Add source and source_images to fields
     all_fields = config.fields + ["source", "source_images"]
@@ -628,7 +652,8 @@ def create_anki_deck(
 
             # Check if flashcards exist
             if not flashcards_path.exists():
-                missing_flashcards.append(str(section_dir))
+                logger.warning(f"No flashcards.json found in {section_dir}")
+                missing_sections.append(str(section_dir))
                 continue
 
             try:
@@ -642,7 +667,7 @@ def create_anki_deck(
                 cards = extract_flashcards(flashcards_data)
                 if not cards:
                     logger.warning(f"No valid cards found in {flashcards_path}")
-                    missing_flashcards.append(str(section_dir))
+                    missing_sections.append(str(section_dir))
                     continue
 
                 # Process images
@@ -659,7 +684,7 @@ def create_anki_deck(
                         row[field] = process_card_field(
                             value,
                             field,
-                            config.strip_markdown_code_fields,
+                            config.code_fields,
                             config.render_markdown,
                             config.syntax_highlight_html,
                         )
@@ -672,10 +697,15 @@ def create_anki_deck(
 
             except Exception as e:
                 logger.error(f"Error processing {section_dir}: {e}", exc_info=True)
-                missing_flashcards.append(str(section_dir))
+                error_sections.append(str(section_dir))
                 continue
 
-    return missing_flashcards
+    return DeckCreationResult(
+        csv_path=csv_path,
+        img_assets_dir=img_assets_dir,
+        missing_sections=missing_sections,
+        error_sections=error_sections,
+    )
 
 
 def extract_flashcards(data: Union[Dict, List]) -> List[Flashcard]:
@@ -696,52 +726,4 @@ def extract_flashcards(data: Union[Dict, List]) -> List[Flashcard]:
     else:
         cards = []
 
-    # Validate cards
-    return [
-        card
-        for card in cards
-        if isinstance(card, dict) and "Front" in card and "Back" in card
-    ]
-
-
-def main():
-    # Example usage
-    book_title = "Fluent Python: Clear, Concise, and Effective Programming"
-    directory = "fluent_python"
-
-    # Create configuration
-    config = AnkiDeckConfig(
-        fields=["Front", "FrontCode", "Back", "BackCode", "Comments"],
-        strip_markdown_code_fields={"FrontCode", "BackCode"},
-        render_markdown=True,
-        syntax_highlight_html=True,
-        separator=",",
-    )
-
-    try:
-        # Create flashcards first
-        create_flashcards_for_book(
-            book_title=book_title,
-            mapping_file=f"{directory}/directory_mapping.json",
-            log_file=f"{directory}/flashcard_creation.log",
-        )
-
-        # Then create the Anki deck
-        missing = create_anki_deck(
-            directory=directory,
-            config=config,
-        )
-
-        if missing:
-            print("\nDirectories missing flashcards:")
-            for dir_path in missing:
-                print(f"  - {dir_path}")
-
-    except Exception as e:
-        logging.error("Job failed", exc_info=True)
-        print("Job failed", e)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+    return [card for card in cards if isinstance(card, dict)]

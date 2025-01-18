@@ -80,6 +80,33 @@ def read_pdf_toc(pdf_path: str | Path) -> List[Dict]:
         doc.close()
 
 
+def is_leaf_section(rel_path: str, section_info: Dict, mappings: Dict) -> bool:
+    """
+    Determine if a section is a leaf section in the TOC hierarchy.
+
+    Args:
+        rel_path: The relative path key of the section
+        section_info: The section's information dictionary
+        mappings: The complete mappings dictionary
+
+    Returns:
+        bool: True if this is a leaf section, False otherwise
+    """
+    # Not a leaf if it's a parent of any other section
+    if any(
+        other_info["full_toc_path"].startswith(f"{section_info['full_toc_path']}/")
+        for other_info in mappings.values()
+    ):
+        return False
+
+    # Must be in the actual hierarchy (not a root section)
+    return any(
+        other_info["full_toc_path"].startswith(section_info["full_toc_path"])
+        for other_info in mappings.values()
+        if other_info["full_toc_path"] != section_info["full_toc_path"]
+    )
+
+
 def print_toc_with_ranges(toc: List[Dict], level: int = 0) -> None:
     """
     Print the table of contents with page ranges.
@@ -127,7 +154,8 @@ def create_directory_structure(
     output_path: str | Path = ".",
     doc: Optional[fitz.Document] = None,
     skip_keywords: set[str] = set(),
-) -> None:
+    screenshot_dpi: int = 300,
+) -> Path:
     """
     Create a directory structure matching the TOC and save page screenshots.
 
@@ -136,6 +164,10 @@ def create_directory_structure(
         toc: Table of contents data
         output_path: Where to create the directory structure
         doc: Optional open PDF document (to avoid reopening)
+        skip_keywords: Set of keywords to skip in section titles
+
+    Returns:
+        Path to the created directory structure
     """
     pdf_path = Path(pdf_path)
     output_path = Path(output_path)
@@ -175,8 +207,8 @@ def create_directory_structure(
             page_bbox = page.bound()
             content_bbox &= page_bbox  # intersect with page bounds
 
-            # Calculate matrix for 300 DPI
-            zoom = 300 / 72
+            # Calculate matrix for screenshot_dpi DPI
+            zoom = screenshot_dpi / 72
             matrix = fitz.Matrix(zoom, zoom)
 
             # Create pixmap of just the content area
@@ -219,7 +251,6 @@ def create_directory_structure(
             path_mapping[rel_path] = {
                 "title": item["title"],
                 "page_range": {"start": item["start_page"], "end": item["end_page"]},
-                "parent": parent_path,
                 "full_toc_path": full_unsanitized_path,
             }
 
@@ -247,47 +278,54 @@ def create_directory_structure(
         with open(mapping_path, "w", encoding="utf-8") as f:
             json.dump(path_mapping, f, indent=2, ensure_ascii=False)
 
+        return top_dir
+
     finally:
         if should_close_doc:
             doc.close()
 
 
-def main():
-    pdf_path = "fluent_python.pdf"
+def process_pdf_and_create_structure(
+    pdf_path: str | Path,
+    output_path: str | Path = ".",
+    skip_keywords: Optional[set[str]] = None,
+) -> Path:
+    """
+    Process a PDF file, extract its table of contents, and create a directory structure.
+
+    Args:
+        pdf_path: Path to the PDF file
+        output_path: Where to create the directory structure
+        skip_keywords: Optional set of keywords to skip in section titles (case-insensitive)
+
+    Returns:
+        Path to the created directory structure
+
+    Raises:
+        ValueError: If the PDF has no table of contents or other validation errors
+        Exception: For other errors during processing
+    """
     try:
-        # Open the document once and reuse it
         doc = fitz.open(pdf_path)
         toc = read_pdf_toc(pdf_path)
 
-        print("Table of Contents with Page Ranges:")
+        print("Extracted ToC:")
         print("-" * 40)
         print_toc_with_ranges(toc)
 
         print("\nCreating directory structure...")
-        create_directory_structure(
+        top_dir = create_directory_structure(
             pdf_path,
             toc,
+            output_path=output_path,
             doc=doc,
-            skip_keywords={
-                "copyright",
-                "about the author",
-                "about the translator",
-                "about the editor",
-                "further reading",
-                "acknowledgements",
-                "about the cover",
-                "about the ebook",
-                "chapter summary",
-                "new in this chapter",
-                "table of contents",
-            },
+            skip_keywords=skip_keywords,
         )
         print("Done!")
 
         doc.close()
+        return top_dir
+
     except Exception as e:
         print(f"Error: {e}")
-
-
-if __name__ == "__main__":
-    main()
+        raise
