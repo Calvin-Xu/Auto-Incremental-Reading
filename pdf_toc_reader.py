@@ -80,30 +80,23 @@ def read_pdf_toc(pdf_path: str | Path) -> List[Dict]:
         doc.close()
 
 
-def is_leaf_section(rel_path: str, section_info: Dict, mappings: Dict) -> bool:
+def is_leaf_section(section_info: Dict, mappings: Dict) -> bool:
     """
     Determine if a section is a leaf section in the TOC hierarchy.
+    A leaf section is one that has no subsections.
 
     Args:
-        rel_path: The relative path key of the section
         section_info: The section's information dictionary
         mappings: The complete mappings dictionary
 
     Returns:
-        bool: True if this is a leaf section, False otherwise
+        bool: True if this is a leaf section (has no subsections), False otherwise
     """
-    # Not a leaf if it's a parent of any other section
-    if any(
+    # A section is a leaf if it's not a parent of any other section
+    # not very efficient (since we should be able to terminate early) but ToS are small
+    return not any(
         other_info["full_toc_path"].startswith(f"{section_info['full_toc_path']}/")
         for other_info in mappings.values()
-    ):
-        return False
-
-    # Must be in the actual hierarchy (not a root section)
-    return any(
-        other_info["full_toc_path"].startswith(section_info["full_toc_path"])
-        for other_info in mappings.values()
-        if other_info["full_toc_path"] != section_info["full_toc_path"]
     )
 
 

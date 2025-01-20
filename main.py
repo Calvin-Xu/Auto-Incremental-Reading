@@ -1,5 +1,6 @@
 import logging
 import sys
+import os
 
 from flashcard_creator import (
     create_flashcards_for_book,
@@ -7,11 +8,17 @@ from flashcard_creator import (
     AnkiDeckConfig,
     FlashcardPromptConfig,
 )
-
 from pdf_toc_reader import process_pdf_and_create_structure
 
 
 def main():
+    # Configure OpenAI API key
+    # Set your API key here if not using environment variable
+    OPENAI_API_KEY = "your-api-key-here"
+
+    if "OPENAI_API_KEY" not in os.environ:
+        os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
     book_title = "Fluent Python: Clear, Concise, and Effective Programming"
     book_path = "fluent_python.pdf"
 
@@ -23,8 +30,8 @@ def main():
 **Guidelines:**
 - **Variety:** Include questions ranging from basic to complex, presenting facts from different angles.
 - **Self-Containment:** Ensure each question is self-contained, similar to exam questions.
-  - If a question uses code that is specific to the book but not the general topic, include the necessary code in the **FrontCode** field.
-  - **No Answer Leaks:** Do not include code or comments in **FrontCode** that reveal the answer to the question. Such code should instead be placed in **BackCode**.
+- If a question uses code that is specific to the book but not the general topic, include the necessary code in the **FrontCode** field.
+- **No Answer Leaks:** Do not include code or comments in **FrontCode** that reveal the answer to the question. Such code should instead be placed in **BackCode**.
 - **Techniques:** Use examples and mnemonic devices where possible.
 - **Clarity:** Craft concise, engaging questions and answers, simplifying complex ideas into clear maxims.
 

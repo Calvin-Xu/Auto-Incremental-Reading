@@ -166,9 +166,7 @@ def create_flashcards_for_book(
 
     # Track progress
     total_sections = sum(
-        1
-        for rel_path, info in mappings.items()
-        if is_leaf_section(rel_path, info, mappings)
+        1 for _, info in mappings.items() if is_leaf_section(info, mappings)
     )
     processed_sections = set()
     resume_found = resume_from is None
@@ -181,7 +179,7 @@ def create_flashcards_for_book(
         # Process each section in the mapping file
         for rel_path, section_info in mappings.items():
             # Skip if not a leaf section
-            if not is_leaf_section(rel_path, section_info, mappings):
+            if not is_leaf_section(section_info, mappings):
                 continue
 
             # Skip if we've already processed this section
@@ -334,7 +332,9 @@ def create_flashcards_from_section_directory(
         chapter_path=chapter_path,
         chapter_title=chapter_title,
         cards_per_page=prompt_config.cards_per_page,
-    )
+    ).strip()
+
+    print(prompt_text)
 
     # Prepare the message with context and all images
     message_content = [
@@ -635,7 +635,7 @@ def create_anki_deck(
         # Process each leaf section
         for rel_path, section_info in mappings.items():
             # Skip if not a leaf section
-            if not is_leaf_section(rel_path, section_info, mappings):
+            if not is_leaf_section(section_info, mappings):
                 continue
 
             section_dir = directory / rel_path
